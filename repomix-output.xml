@@ -1,0 +1,1480 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+.gitignore
+.python-version
+app/__init__.py
+app/core/__init__.py
+app/core/config.py
+app/db/__init__.py
+app/db/chroma_store.py
+app/main.py
+app/rag/__init__.py
+app/rag/embeddings.py
+app/rag/ingestion.py
+app/rag/loaders.py
+app/rag/ollama_client.py
+app/rag/prompt.py
+app/rag/retriever.py
+app/rag/splitter.py
+app/rag/ws_protocol.py
+app/routes/__init__.py
+app/routes/chat.py
+app/routes/health.py
+app/routes/ingest.py
+app/scripts/__init__.py
+app/scripts/ingest_cli.py
+README.md
+requirements.txt
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env.example">
+# Copy this file to `.env` and adjust as needed. All values here have
+# sane defaults in app/core/config.py if you omit them.
+
+# --- Ollama ---
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+OLLAMA_TIMEOUT_SECONDS=60
+
+# --- Embeddings ---
+EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+
+# --- Chunking ---
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+
+# --- Retrieval ---
+RETRIEVAL_TOP_K=4
+
+# --- CORS (comma-separated list parsed by pydantic-settings) ---
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+</file>
+
+<file path=".gitignore">
+venv/
+__pycache__/
+*.pyc
+.env
+data/chroma_db/
+data/uploads/
+</file>
+
+<file path=".python-version">
+3.11
+</file>
+
+<file path="app/__init__.py">
+
+</file>
+
+<file path="app/core/__init__.py">
+
+</file>
+
+<file path="app/core/config.py">
+"""
+Centralized application configuration.
+
+All tunables (model names, chunk sizes, paths, timeouts) live here so that
+ingestion, retrieval, and chat logic never hardcode values. Override any
+of these via a `.env` file in /backend or real environment variables.
+"""
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent  # /backend
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    # --- App ---
+    app_name: str = "Full-Stack Architecture Explorer"
+    api_v1_prefix: str = "/api/v1"
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # --- Storage paths ---
+    data_dir: Path = BACKEND_ROOT / "data"
+    chroma_persist_dir: Path = BACKEND_ROOT / "data" / "chroma_db"
+    upload_dir: Path = BACKEND_ROOT / "data" / "uploads"
+
+    # --- Embeddings ---
+    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+    # --- Chunking ---
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+
+    # --- Vector store / retrieval ---
+    chroma_collection_name: str = "docs"
+    retrieval_top_k: int = 4
+
+    # --- Ollama / LLM ---
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3"
+    ollama_timeout_seconds: int = 60
+    llm_temperature: float = 0.2
+
+    # --- WebSocket ---
+    ws_heartbeat_seconds: int = 30
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached settings singleton so we parse .env / env vars only once."""
+    settings = Settings()
+    settings.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    return settings
+</file>
+
+<file path="app/db/__init__.py">
+
+</file>
+
+<file path="app/db/chroma_store.py">
+"""
+ChromaDB wrapper.
+
+Owns the one place in the app that talks to Chroma directly. Everything
+else (ingestion endpoint, retriever) goes through `get_vector_store()` so
+that swapping persistence details later only touches this file.
+
+Persistence: Chroma is configured with a local on-disk directory
+(settings.chroma_persist_dir), so the index survives process restarts —
+no server, no Docker, no paid service.
+"""
+from functools import lru_cache
+
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+from app.core.config import get_settings
+from app.rag.embeddings import get_embedding_function
+
+
+@lru_cache
+def get_vector_store() -> Chroma:
+    """
+    Cached singleton for the Chroma client + collection.
+
+    Cached for the same reason as the embedding function: re-opening the
+    persistent store on every call would be wasteful and risks file-lock
+    contention against itself within one process.
+    """
+    settings = get_settings()
+    return Chroma(
+        collection_name=settings.chroma_collection_name,
+        embedding_function=get_embedding_function(),
+        persist_directory=str(settings.chroma_persist_dir),
+    )
+
+
+def add_documents(chunks: list[Document]) -> list[str]:
+    """
+    Embed and upsert a list of chunked Documents into the persistent store.
+
+    Returns the list of generated Chroma IDs (useful for logging / tests).
+    Empty input is a no-op that returns an empty list rather than raising,
+    so callers don't need to special-case "ingested a file with 0 chunks".
+    """
+    if not chunks:
+        return []
+
+    store = get_vector_store()
+    return store.add_documents(chunks)
+
+
+def similarity_search(query: str, k: int | None = None) -> list[Document]:
+    """
+    Top-k similarity search against the persistent store.
+
+    `k` defaults to settings.retrieval_top_k so callers don't need to know
+    the configured default; Phase 3's retriever module will be the main
+    caller of this function.
+    """
+    settings = get_settings()
+    store = get_vector_store()
+    return store.similarity_search(query, k=k or settings.retrieval_top_k)
+
+
+def collection_count() -> int:
+    """Number of chunks currently stored — used by the ingest endpoint's
+    response and by health/diagnostics."""
+    store = get_vector_store()
+    return store._collection.count()  # noqa: SLF001 — Chroma doesn't expose this publicly yet
+</file>
+
+<file path="app/main.py">
+"""
+FastAPI application entrypoint.
+
+This file should stay thin: wire up middleware and routers only.
+Business logic (ingestion, retrieval, streaming chat) lives in
+app/rag and app/db, exposed through app/routes/*.
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import get_settings
+from app.routes import chat, health, ingest
+
+settings = get_settings()
+
+app = FastAPI(title=settings.app_name)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(health.router, prefix=settings.api_v1_prefix)
+app.include_router(ingest.router, prefix=settings.api_v1_prefix)
+app.include_router(chat.router)  # WebSocket route: no REST prefix, lives at /ws/chat
+</file>
+
+<file path="app/rag/__init__.py">
+
+</file>
+
+<file path="app/rag/embeddings.py">
+"""
+Embeddings.
+
+Wraps a local HuggingFace sentence-transformers model so the rest of the
+app never imports `langchain_huggingface` directly. The model is loaded
+once and cached, since loading it from disk/HF cache on every request
+would be slow and pointless (the weights don't change).
+
+No API keys, no network calls at inference time (the model is downloaded
+once to the local HF cache on first run, then used fully offline).
+"""
+from functools import lru_cache
+
+from langchain_huggingface import HuggingFaceEmbeddings
+
+from app.core.config import get_settings
+
+
+@lru_cache
+def get_embedding_function() -> HuggingFaceEmbeddings:
+    """
+    Cached singleton so the embedding model is loaded into memory exactly
+    once per process, regardless of how many times this is called.
+    """
+    settings = get_settings()
+    return HuggingFaceEmbeddings(
+        model_name=settings.embedding_model_name,
+        # CPU is the safe default for a "runs anywhere locally" project.
+        # If the user has a CUDA GPU available, they can override this by
+        # editing model_kwargs below — left explicit here rather than
+        # auto-detected so behavior is predictable across machines.
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+</file>
+
+<file path="app/rag/ingestion.py">
+"""
+Ingestion orchestration.
+
+This is the one function both the `/ingest` endpoint and the standalone
+CLI script call. Keeping the orchestration here (rather than duplicating
+it in both the route and the script) means there's exactly one place that
+defines "what does it mean to ingest a file."
+"""
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.db.chroma_store import add_documents
+from app.rag.loaders import UnsupportedFileTypeError, load_document
+from app.rag.splitter import split_documents
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class IngestResult:
+    filename: str
+    pages_or_sections_loaded: int
+    chunks_created: int
+    chunk_ids: list[str]
+
+
+class IngestionError(Exception):
+    """Wraps any failure during the load -> split -> embed -> store pipeline
+    with the filename that caused it, so callers (route or CLI) can report
+    a useful error instead of a bare traceback."""
+
+    def __init__(self, filename: str, original: Exception):
+        self.filename = filename
+        self.original = original
+        super().__init__(f"Failed to ingest '{filename}': {original}")
+
+
+def ingest_file(file_path: Path) -> IngestResult:
+    """
+    Run the full ingestion pipeline for a single file already saved to disk.
+
+    Raises IngestionError (wrapping UnsupportedFileTypeError or any other
+    failure) so callers get a consistent error type regardless of which
+    stage failed.
+    """
+    try:
+        docs = load_document(file_path)
+        if not docs:
+            logger.warning("No content extracted from %s", file_path.name)
+
+        chunks = split_documents(docs)
+        chunk_ids = add_documents(chunks)
+
+        logger.info(
+            "Ingested %s: %d source section(s) -> %d chunk(s)",
+            file_path.name,
+            len(docs),
+            len(chunks),
+        )
+
+        return IngestResult(
+            filename=file_path.name,
+            pages_or_sections_loaded=len(docs),
+            chunks_created=len(chunks),
+            chunk_ids=chunk_ids,
+        )
+    except UnsupportedFileTypeError:
+        raise  # let callers distinguish "bad file type" from other failures
+    except Exception as exc:  # noqa: BLE001 — intentionally broad: this is a pipeline boundary
+        raise IngestionError(file_path.name, exc) from exc
+</file>
+
+<file path="app/rag/loaders.py">
+"""
+Document loading.
+
+Responsible for turning a raw file on disk (PDF or Markdown) into a list of
+LangChain `Document` objects, each carrying metadata we'll need later for
+citations: source filename and a page/line locator.
+
+This module does NOT chunk or embed — that's the job of `splitter.py` and
+`embeddings.py`. Keeping load/split/embed separate makes each piece testable
+and replaceable on its own.
+"""
+from pathlib import Path
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
+
+SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown"}
+
+
+class UnsupportedFileTypeError(ValueError):
+    """Raised when a file extension isn't one we know how to ingest."""
+
+
+def load_document(file_path: Path) -> list[Document]:
+    """
+    Load a single file into LangChain Documents.
+
+    - PDF: one Document per page, with `page` metadata (1-indexed) set by
+      PyPDFLoader (it's 0-indexed natively; we normalize to 1-indexed here
+      since that's what a human looking at the PDF would expect).
+    - Markdown: one Document per file, with `line_start`/`line_end` set to
+      cover the whole file. (Per-chunk line numbers are refined later in
+      the splitter, since chunk boundaries don't exist yet at load time.)
+
+    Raises UnsupportedFileTypeError for anything else.
+    """
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        return _load_pdf(file_path)
+    if suffix in (".md", ".markdown"):
+        return _load_markdown(file_path)
+
+    raise UnsupportedFileTypeError(
+        f"Unsupported file type '{suffix}' for {file_path.name}. "
+        f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+    )
+
+
+def _load_pdf(file_path: Path) -> list[Document]:
+    loader = PyPDFLoader(str(file_path))
+    raw_docs = loader.load()  # one Document per page, 0-indexed "page" metadata
+
+    docs: list[Document] = []
+    for doc in raw_docs:
+        page_zero_indexed = doc.metadata.get("page", 0)
+        docs.append(
+            Document(
+                page_content=doc.page_content,
+                metadata={
+                    "source": file_path.name,
+                    "page": page_zero_indexed + 1,  # human-friendly, 1-indexed
+                    "file_type": "pdf",
+                },
+            )
+        )
+    return docs
+
+
+def _load_markdown(file_path: Path) -> list[Document]:
+    text = file_path.read_text(encoding="utf-8")
+    line_count = text.count("\n") + 1
+
+    return [
+        Document(
+            page_content=text,
+            metadata={
+                "source": file_path.name,
+                "line_start": 1,
+                "line_end": line_count,
+                "file_type": "markdown",
+            },
+        )
+    ]
+</file>
+
+<file path="app/rag/ollama_client.py">
+"""
+Ollama client wrapper.
+
+Isolates all direct interaction with the `ollama` Python package so that
+the WebSocket route doesn't need to know about Ollama's client API,
+timeouts, or connection errors directly.
+
+Streaming is exposed as a generator yielding plain text chunks. Cancellation
+is cooperative: the caller (the WebSocket route) is responsible for
+breaking out of the `for` loop early when it receives a stop signal from
+the client — Python generators stop producing work the moment you stop
+iterating them, so no extra cancellation plumbing is needed here.
+"""
+import logging
+from collections.abc import Iterator
+
+import httpx
+import ollama
+
+from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+class OllamaConnectionError(Exception):
+    """Raised when Ollama can't be reached at all (not running, wrong port)."""
+
+
+class OllamaTimeoutError(Exception):
+    """Raised when Ollama is reachable but a generation call exceeds the
+    configured timeout."""
+
+
+def stream_completion(prompt: str) -> Iterator[str]:
+    """
+    Stream a completion from Ollama token-chunk by token-chunk.
+
+    Yields plain text pieces as they arrive. Raises OllamaConnectionError
+    or OllamaTimeoutError on failure so the caller can send a clean error
+    message to the client instead of an unhandled exception killing the
+    WebSocket connection.
+    """
+    settings = get_settings()
+    client = ollama.Client(host=settings.ollama_base_url, timeout=settings.ollama_timeout_seconds)
+
+    try:
+        stream = client.generate(
+            model=settings.ollama_model,
+            prompt=prompt,
+            stream=True,
+            options={"temperature": settings.llm_temperature},
+        )
+        for chunk in stream:
+            text_piece = chunk.get("response", "")
+            if text_piece:
+                yield text_piece
+            if chunk.get("done"):
+                break
+    except ollama.ResponseError as exc:
+        # Model not pulled, bad request, etc. — Ollama returned an error
+        # response rather than failing the connection outright.
+        logger.error("Ollama response error: %s", exc)
+        raise OllamaConnectionError(
+            f"Ollama returned an error (is '{settings.ollama_model}' pulled? "
+            f"Run: ollama pull {settings.ollama_model}): {exc}"
+        ) from exc
+    except (ConnectionError, TimeoutError, httpx.ConnectError, httpx.TimeoutException) as exc:
+        logger.error("Ollama unreachable at %s: %s", settings.ollama_base_url, exc)
+        raise OllamaConnectionError(
+            f"Could not reach Ollama at {settings.ollama_base_url}. "
+            f"Is it running? Try: ollama serve"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — last-resort boundary around a 3rd-party client
+        logger.exception("Unexpected error streaming from Ollama")
+        raise OllamaConnectionError(f"Unexpected error from Ollama: {exc}") from exc
+</file>
+
+<file path="app/rag/prompt.py">
+"""
+Prompt construction.
+
+Builds the exact string sent to Ollama. Kept as plain string templating
+(no LangChain PromptTemplate/Runnable chain) so it's trivial to read,
+test, and tweak the wording without learning LangChain's chain API for
+something this simple — LangChain earns its keep in the loaders/splitters,
+not necessarily here.
+
+The instruction to cite using [n] markers is what lets the frontend
+(Phase 5) regex-match citation markers in the streamed text and map them
+back to the `citations` list sent alongside the stream.
+"""
+from app.rag.retriever import RetrievedChunk
+
+SYSTEM_INSTRUCTIONS = (
+    "You are a helpful assistant answering questions about software "
+    "architecture documentation. Answer ONLY using the provided context. "
+    "If the context does not contain the answer, say you don't have "
+    "enough information in the ingested documents — do not make things up.\n\n"
+    "When you state a fact from the context, cite it inline using the "
+    "format [n], where n is the chunk number from the Context section "
+    "below. Example: \"The backend uses FastAPI [1].\""
+)
+
+
+def build_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
+    """
+    Assemble the full prompt string: system instructions, numbered
+    context chunks (each labeled with its citation), then the user query.
+
+    If `chunks` is empty, the context section explicitly says so rather
+    than being silently omitted — this nudges the model toward the
+    "I don't have enough information" answer instead of guessing.
+    """
+    if not chunks:
+        context_block = "(No relevant context was found in the ingested documents.)"
+    else:
+        context_block = "\n\n".join(
+            f"[{i+1}] (Source: {chunk.citation_label()})\n{chunk.text}"
+            for i, chunk in enumerate(chunks)
+        )
+
+    return (
+        f"{SYSTEM_INSTRUCTIONS}\n\n"
+        f"--- Context ---\n{context_block}\n\n"
+        f"--- Question ---\n{query}\n\n"
+        f"--- Answer ---\n"
+    )
+</file>
+
+<file path="app/rag/retriever.py">
+"""
+Retrieval.
+
+Thin layer on top of app.db.chroma_store.similarity_search that:
+  1. Runs the top-k search for a user query
+  2. Shapes the results into a consistent `RetrievedChunk` the rest of the
+     chat pipeline (prompt builder, WebSocket route) can rely on, instead
+     of passing raw LangChain Documents around everywhere.
+
+Kept separate from chroma_store.py because retrieval logic (e.g. future
+re-ranking, score thresholds, hybrid search) belongs here, while
+chroma_store.py should stay a dumb persistence wrapper.
+"""
+from dataclasses import dataclass
+
+from app.db.chroma_store import similarity_search
+
+
+@dataclass
+class RetrievedChunk:
+    text: str
+    source: str
+    file_type: str
+    page: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+
+    def citation_label(self) -> str:
+        """Human-readable citation, e.g. 'architecture.pdf, p.4' or
+        'readme.md, lines 12-18'. Used in the prompt sent to the LLM and
+        can also be reused as-is by the frontend if it doesn't want to
+        build its own formatting."""
+        if self.file_type == "pdf" and self.page is not None:
+            return f"{self.source}, p.{self.page}"
+        if self.line_start is not None and self.line_end is not None:
+            return f"{self.source}, lines {self.line_start}-{self.line_end}"
+        return self.source
+
+
+def retrieve(query: str, k: int | None = None) -> list[RetrievedChunk]:
+    """
+    Run similarity search and return shaped, citation-ready chunks.
+
+    Returns an empty list (not an error) when nothing is found — callers
+    decide how to handle "no context" (e.g. the WebSocket route sends an
+    explicit warning to the client rather than silently hallucinating).
+    """
+    docs = similarity_search(query, k=k)
+
+    chunks: list[RetrievedChunk] = []
+    for doc in docs:
+        meta = doc.metadata
+        chunks.append(
+            RetrievedChunk(
+                text=doc.page_content,
+                source=meta.get("source", "unknown"),
+                file_type=meta.get("file_type", "unknown"),
+                page=meta.get("page"),
+                line_start=meta.get("line_start"),
+                line_end=meta.get("line_end"),
+            )
+        )
+    return chunks
+</file>
+
+<file path="app/rag/splitter.py">
+"""
+Chunking.
+
+Splits loaded Documents into overlapping chunks suitable for embedding.
+Chunk size/overlap come from app.core.config so they're tunable without
+touching this code.
+
+Citation note: for PDFs, every chunk inherits the `page` metadata from its
+source page Document (set in loaders.py), since PyPDFLoader already gives
+us one Document per page. For Markdown, the source Document spans the
+whole file, so after splitting we recompute approximate line numbers per
+chunk by locating each chunk's text within the original content. This is
+what lets the frontend later cite "source.md, lines 40-58" instead of just
+"source.md".
+"""
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from app.core.config import get_settings
+
+
+def split_documents(docs: list[Document]) -> list[Document]:
+    """
+    Split a list of loaded Documents into overlapping chunks.
+
+    Each output Document's metadata always contains at least:
+      - source: original filename
+      - file_type: "pdf" | "markdown"
+    plus either:
+      - page: int (PDF)
+      - line_start, line_end: int (Markdown)
+    """
+    settings = get_settings()
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        # Prefer splitting on paragraph/sentence boundaries before falling
+        # back to raw character cuts, so chunks stay semantically coherent.
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+
+    chunks: list[Document] = []
+    for doc in docs:
+        if doc.metadata.get("file_type") == "markdown":
+            chunks.extend(_split_markdown_with_line_numbers(doc, splitter))
+        else:
+            # PDF (or any future page-based format): every chunk just
+            # inherits the parent page's metadata as-is.
+            for chunk in splitter.split_documents([doc]):
+                chunks.append(chunk)
+
+    return chunks
+
+
+def _split_markdown_with_line_numbers(
+    doc: Document, splitter: RecursiveCharacterTextSplitter
+) -> list[Document]:
+    """
+    Split a whole-file Markdown Document into chunks, then back-compute each
+    chunk's line range by finding its text's offset in the original content.
+
+    This is a best-effort locator: if a chunk's exact text can't be found
+    (which shouldn't normally happen since the splitter only cuts the
+    original text), we fall back to the parent document's full line range
+    rather than failing the whole ingestion.
+    """
+    full_text = doc.page_content
+    sub_chunks = splitter.split_text(full_text)
+
+    result: list[Document] = []
+    search_start = 0
+    for chunk_text in sub_chunks:
+        offset = full_text.find(chunk_text, search_start)
+        if offset == -1:
+            # Overlap can occasionally make forward-only search miss a
+            # match; retry from the beginning once before giving up.
+            offset = full_text.find(chunk_text)
+
+        if offset == -1:
+            line_start = doc.metadata["line_start"]
+            line_end = doc.metadata["line_end"]
+        else:
+            line_start = full_text.count("\n", 0, offset) + 1
+            line_end = line_start + chunk_text.count("\n")
+            search_start = offset + 1  # allow overlapping matches to advance
+
+        result.append(
+            Document(
+                page_content=chunk_text,
+                metadata={
+                    "source": doc.metadata["source"],
+                    "file_type": "markdown",
+                    "line_start": line_start,
+                    "line_end": line_end,
+                },
+            )
+        )
+
+    return result
+</file>
+
+<file path="app/rag/ws_protocol.py">
+"""
+WebSocket message protocol for /ws/chat.
+
+Defining this as Pydantic models (rather than ad-hoc dicts scattered
+through the route) gives us validation on incoming client messages and a
+single source of truth for what the frontend should expect to receive.
+This file is the "API contract" between Phase 3 (backend) and Phase 5
+(frontend WebSocket hook) — keep it in sync with the frontend types when
+either side changes.
+
+--- Client -> Server ---
+  {"type": "query", "payload": {"text": "..."}}
+  {"type": "stop"}
+
+--- Server -> Client ---
+  {"type": "citations", "payload": {"citations": [...]}}   # sent once, before tokens
+  {"type": "token", "payload": {"text": "..."}}            # sent many times
+  {"type": "done"}                                          # sent once, stream finished
+  {"type": "error", "payload": {"message": "..."}}         # sent on failure, stream ends
+  {"type": "stopped"}                                       # sent once, if client cancelled
+"""
+from typing import Literal
+
+from pydantic import BaseModel, ValidationError
+
+
+class ClientQueryPayload(BaseModel):
+    text: str
+
+
+class ClientQueryMessage(BaseModel):
+    type: Literal["query"]
+    payload: ClientQueryPayload
+
+
+class ClientStopMessage(BaseModel):
+    type: Literal["stop"]
+
+
+class CitationPayload(BaseModel):
+    index: int  # matches the [n] marker used in the prompt/response text
+    source: str
+    file_type: str
+    page: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    label: str  # pre-formatted, e.g. "architecture.pdf, p.4"
+    snippet: str  # the chunk text itself, for the frontend's citation panel
+
+
+class ServerCitationsMessage(BaseModel):
+    type: Literal["citations"] = "citations"
+    payload: dict[str, list[CitationPayload]]
+
+
+class ServerTokenMessage(BaseModel):
+    type: Literal["token"] = "token"
+    payload: dict[str, str]
+
+
+class ServerDoneMessage(BaseModel):
+    type: Literal["done"] = "done"
+
+
+class ServerStoppedMessage(BaseModel):
+    type: Literal["stopped"] = "stopped"
+
+
+class ServerErrorMessage(BaseModel):
+    type: Literal["error"] = "error"
+    payload: dict[str, str]
+
+
+class ProtocolError(Exception):
+    """Raised when an incoming client message doesn't match any known
+    message type, so the route can send a clean ServerErrorMessage instead
+    of crashing the connection on a raw ValidationError/KeyError."""
+
+
+def parse_client_message(raw: dict) -> ClientQueryMessage | ClientStopMessage:
+    """Validate and parse a raw client WebSocket message dict into one of
+    the known typed messages."""
+    msg_type = raw.get("type")
+
+    try:
+        if msg_type == "query":
+            return ClientQueryMessage.model_validate(raw)
+        if msg_type == "stop":
+            return ClientStopMessage.model_validate(raw)
+    except ValidationError as exc:
+        raise ProtocolError(f"Malformed '{msg_type}' message: {exc}") from exc
+
+    raise ProtocolError(f"Unknown message type: {msg_type!r}")
+</file>
+
+<file path="app/routes/__init__.py">
+
+</file>
+
+<file path="app/routes/chat.py">
+"""
+WebSocket streaming chat endpoint.
+
+Protocol is defined in app/rag/ws_protocol.py. Summary of the message flow
+for a single query:
+
+  client --query--> server
+  server --citations--> client      (sent once, before any tokens, so the
+                                      frontend can render citation badges
+                                      as soon as the answer starts streaming)
+  server --token--> client           (repeated, as Ollama streams)
+  server --done--> client            (stream finished normally)
+
+  OR, if the client sends `stop` mid-stream:
+  server --stopped--> client         (generation cancelled, no further tokens)
+
+  OR, on failure at any point:
+  server --error--> client           (stream ends; connection stays open
+                                       for the next query)
+
+Concurrency design: a single background task (`_reader`) owns
+`websocket.receive_json()` for the lifetime of the connection. Every
+incoming message is pushed onto an asyncio.Queue. The main loop pulls
+"query" messages off that queue and processes them one at a time; "stop"
+messages instead set an asyncio.Event directly from the reader task, so a
+stop sent while a query is mid-stream is observed immediately rather than
+waiting for the next `receive_json()` call (which is what a naive
+sequential receive-then-process loop would do — see inline comment below
+for why that matters).
+
+A "stop" with nothing in flight is harmless: it just sets an Event that
+gets cleared again at the start of the next query.
+"""
+import asyncio
+import logging
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.rag.ollama_client import OllamaConnectionError, stream_completion
+from app.rag.prompt import build_prompt
+from app.rag.retriever import retrieve
+from app.rag.ws_protocol import (
+    ClientQueryMessage,
+    ClientStopMessage,
+    CitationPayload,
+    ProtocolError,
+    parse_client_message,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["chat"])
+
+
+@router.websocket("/ws/chat")
+async def chat_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+
+    stop_event = asyncio.Event()
+    query_queue: asyncio.Queue[str] = asyncio.Queue()
+    disconnect_event = asyncio.Event()
+
+    reader_task = asyncio.create_task(
+        _reader(websocket, query_queue, stop_event, disconnect_event)
+    )
+
+    try:
+        while not disconnect_event.is_set():
+            get_query = asyncio.create_task(query_queue.get())
+            wait_disconnect = asyncio.create_task(disconnect_event.wait())
+            done, pending = await asyncio.wait(
+                {get_query, wait_disconnect}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+
+            if wait_disconnect in done:
+                break
+
+            query_text = get_query.result()
+            stop_event.clear()
+            await _handle_query(websocket, query_text, stop_event)
+    finally:
+        reader_task.cancel()
+
+
+async def _reader(
+    websocket: WebSocket,
+    query_queue: asyncio.Queue[str],
+    stop_event: asyncio.Event,
+    disconnect_event: asyncio.Event,
+) -> None:
+    """
+    Continuously reads incoming client messages for the life of the
+    connection. This runs concurrently with `_handle_query` in the main
+    loop, which is what lets a "stop" message take effect immediately
+    instead of waiting behind whatever `_handle_query` is currently doing.
+
+    Without this split, a single sequential loop (receive -> process ->
+    receive -> process) would only ever check for a new message *after*
+    the current query's stream finished — by which point "stop" arrived
+    too late to do anything.
+    """
+    try:
+        while True:
+            raw = await websocket.receive_json()
+            try:
+                message = parse_client_message(raw)
+            except ProtocolError as exc:
+                await websocket.send_json(
+                    {"type": "error", "payload": {"message": str(exc)}}
+                )
+                continue
+
+            if isinstance(message, ClientStopMessage):
+                stop_event.set()
+            elif isinstance(message, ClientQueryMessage):
+                await query_queue.put(message.payload.text)
+    except WebSocketDisconnect:
+        logger.info("Client disconnected from /ws/chat")
+    finally:
+        disconnect_event.set()
+
+
+async def _handle_query(websocket: WebSocket, query_text: str, stop_event: asyncio.Event) -> None:
+    query_text = query_text.strip()
+    if not query_text:
+        await websocket.send_json(
+            {"type": "error", "payload": {"message": "Query text cannot be empty."}}
+        )
+        return
+
+    # --- Retrieval ---
+    try:
+        chunks = await asyncio.to_thread(retrieve, query_text)
+    except Exception as exc:  # noqa: BLE001 — boundary around the vector store
+        logger.exception("Retrieval failed for query: %r", query_text)
+        await websocket.send_json(
+            {"type": "error", "payload": {"message": f"Retrieval failed: {exc}"}}
+        )
+        return
+
+    citations = [
+        CitationPayload(
+            index=i + 1,
+            source=chunk.source,
+            file_type=chunk.file_type,
+            page=chunk.page,
+            line_start=chunk.line_start,
+            line_end=chunk.line_end,
+            label=chunk.citation_label(),
+            snippet=chunk.text,
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+    await websocket.send_json(
+        {"type": "citations", "payload": {"citations": [c.model_dump() for c in citations]}}
+    )
+
+    # --- Generation ---
+    prompt = build_prompt(query_text, chunks)
+
+    try:
+        async for text_piece in _astream(prompt):
+            if stop_event.is_set():
+                await websocket.send_json({"type": "stopped"})
+                return
+            await websocket.send_json({"type": "token", "payload": {"text": text_piece}})
+    except OllamaConnectionError as exc:
+        await websocket.send_json({"type": "error", "payload": {"message": str(exc)}})
+        return
+    except Exception as exc:  # noqa: BLE001 — boundary around the LLM call
+        logger.exception("Unexpected error during generation")
+        await websocket.send_json(
+            {"type": "error", "payload": {"message": f"Unexpected error: {exc}"}}
+        )
+        return
+
+    await websocket.send_json({"type": "done"})
+
+
+async def _astream(prompt: str):
+    """
+    Bridge Ollama's synchronous generator (stream_completion) into an async
+    generator, since FastAPI's WebSocket send calls are async but the
+    `ollama` client's streaming API is blocking/sync.
+
+    Each `next()` call runs in the default executor so the event loop isn't
+    blocked while waiting on Ollama — necessary so the `_reader` task (and
+    therefore stop-message handling) keeps running concurrently.
+    """
+    iterator = stream_completion(prompt)
+    loop = asyncio.get_event_loop()
+
+    def _next_or_sentinel():
+        try:
+            return next(iterator)
+        except StopIteration:
+            return None
+
+    while True:
+        piece = await loop.run_in_executor(None, _next_or_sentinel)
+        if piece is None:
+            break
+        yield piece
+</file>
+
+<file path="app/routes/health.py">
+"""
+Simple liveness/readiness endpoint.
+
+Kept dumb on purpose: it should never import heavy RAG/embedding/DB code,
+so that `/health` stays fast and reliable even if the vector store or
+Ollama is down. Phase 3 will likely add a `/health/ready` variant that
+checks Ollama + Chroma connectivity.
+"""
+from fastapi import APIRouter
+
+from app.core.config import get_settings
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health_check() -> dict:
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+    }
+</file>
+
+<file path="app/routes/ingest.py">
+"""
+Ingestion endpoint.
+
+Accepts a file upload, saves it to disk under settings.upload_dir, then
+runs it through the ingestion pipeline (load -> split -> embed -> store).
+
+Error handling per the engineering constraints:
+  - Unsupported file type -> 400, not 500
+  - Any other pipeline failure (corrupt PDF, encoding issue, etc.) -> 500
+    with a message, not a bare stack trace leaked to the client
+"""
+import logging
+import shutil
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, UploadFile, status
+from pydantic import BaseModel
+
+from app.core.config import get_settings
+from app.rag.ingestion import IngestionError, ingest_file
+from app.rag.loaders import SUPPORTED_EXTENSIONS, UnsupportedFileTypeError
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["ingestion"])
+
+
+class IngestResponse(BaseModel):
+    filename: str
+    pages_or_sections_loaded: int
+    chunks_created: int
+
+
+@router.post("/ingest", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
+async def ingest(file: UploadFile) -> IngestResponse:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Uploaded file has no filename.")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type '{suffix}'. "
+                f"Supported types: {sorted(SUPPORTED_EXTENSIONS)}"
+            ),
+        )
+
+    settings = get_settings()
+    destination = settings.upload_dir / file.filename
+
+    try:
+        with destination.open("wb") as out_file:
+            shutil.copyfileobj(file.file, out_file)
+    except OSError as exc:
+        logger.exception("Failed to save uploaded file %s", file.filename)
+        raise HTTPException(
+            status_code=500, detail=f"Could not save uploaded file: {exc}"
+        ) from exc
+
+    try:
+        result = ingest_file(destination)
+    except UnsupportedFileTypeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IngestionError as exc:
+        logger.exception("Ingestion pipeline failed for %s", file.filename)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ingestion failed for '{exc.filename}': {exc.original}",
+        ) from exc
+
+    return IngestResponse(
+        filename=result.filename,
+        pages_or_sections_loaded=result.pages_or_sections_loaded,
+        chunks_created=result.chunks_created,
+    )
+</file>
+
+<file path="app/scripts/__init__.py">
+
+</file>
+
+<file path="app/scripts/ingest_cli.py">
+#!/usr/bin/env python3
+"""
+Bulk ingestion CLI.
+
+Usage:
+    python -m app.scripts.ingest_cli /path/to/docs_folder
+    python -m app.scripts.ingest_cli /path/to/single_file.pdf
+
+Walks a folder (or takes a single file), runs every supported file through
+the same ingestion pipeline the `/ingest` endpoint uses, and prints a
+summary. This exists because re-uploading 50 PDFs through curl/Postman one
+at a time is not anyone's idea of a good afternoon.
+"""
+import logging
+import sys
+from pathlib import Path
+
+from app.rag.ingestion import IngestionError, ingest_file
+from app.rag.loaders import SUPPORTED_EXTENSIONS, UnsupportedFileTypeError
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def collect_files(target: Path) -> list[Path]:
+    if target.is_file():
+        return [target]
+    if target.is_dir():
+        return sorted(
+            p for p in target.rglob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS
+        )
+    raise FileNotFoundError(f"Path does not exist: {target}")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(f"Usage: python -m app.scripts.ingest_cli <file_or_folder>", file=sys.stderr)
+        return 1
+
+    target = Path(argv[1]).expanduser().resolve()
+    try:
+        files = collect_files(target)
+    except FileNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+
+    if not files:
+        logger.warning(
+            "No supported files (%s) found under %s", sorted(SUPPORTED_EXTENSIONS), target
+        )
+        return 0
+
+    logger.info("Found %d file(s) to ingest", len(files))
+
+    succeeded, failed = 0, 0
+    for file_path in files:
+        try:
+            result = ingest_file(file_path)
+            logger.info(
+                "  ✓ %s — %d section(s) -> %d chunk(s)",
+                result.filename,
+                result.pages_or_sections_loaded,
+                result.chunks_created,
+            )
+            succeeded += 1
+        except UnsupportedFileTypeError as exc:
+            logger.error("  ✗ %s — %s", file_path.name, exc)
+            failed += 1
+        except IngestionError as exc:
+            logger.error("  ✗ %s — %s", exc.filename, exc.original)
+            failed += 1
+
+    logger.info("Done. %d succeeded, %d failed.", succeeded, failed)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+</file>
+
+<file path="README.md">
+# Backend — Full-Stack Architecture Explorer
+
+Phase 1 scaffold: FastAPI app skeleton, config, health check. No RAG logic yet
+(that's Phase 2/3).
+
+## Setup
+
+```bash
+cd backend
+
+# 1. Create and activate a Python 3.11 virtual environment
+python3.11 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Copy env template (optional — defaults work out of the box)
+cp .env.example .env
+
+# 4. Run the dev server
+uvicorn app.main:app --reload --port 8000
+```
+
+Visit `http://localhost:8000/api/v1/health` — you should see:
+
+```json
+{"status": "ok", "app": "Full-Stack Architecture Explorer"}
+```
+
+## Ingesting documents (Phase 2)
+
+Two ways to get PDF/Markdown docs into the vector store:
+
+**1. Via the API** (good for one-off uploads, e.g. from the future frontend):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ingest \
+  -F "file=@/path/to/document.pdf"
+```
+
+Response:
+```json
+{"filename": "document.pdf", "pages_or_sections_loaded": 12, "chunks_created": 47}
+```
+
+**2. Via the CLI script** (good for bulk-loading a whole docs folder):
+
+```bash
+python -m app.scripts.ingest_cli /path/to/docs_folder
+# or a single file:
+python -m app.scripts.ingest_cli /path/to/document.pdf
+```
+
+Both paths run the same pipeline: load → chunk (with overlap) → embed
+(local HuggingFace model) → store in ChromaDB (persisted to
+`data/chroma_db/`). Supported file types: `.pdf`, `.md`, `.markdown`.
+
+Every chunk is stored with citation metadata:
+- PDF chunks: `source` (filename) + `page` (1-indexed)
+- Markdown chunks: `source` (filename) + `line_start` / `line_end`
+
+**Note:** the first ingestion will download the embedding model
+(`sentence-transformers/all-MiniLM-L6-v2`, ~90MB) from Hugging Face. After
+that it's cached locally and runs fully offline.
+
+## Streaming chat (Phase 3)
+
+WebSocket endpoint: `ws://localhost:8000/ws/chat`
+
+**Message protocol** (full schema in `app/rag/ws_protocol.py`):
+
+Client → Server:
+```json
+{"type": "query", "payload": {"text": "What does the backend use?"}}
+{"type": "stop"}
+```
+
+Server → Client (in order, for one query):
+```json
+{"type": "citations", "payload": {"citations": [{"index": 1, "source": "architecture.md", "file_type": "markdown", "line_start": 10, "line_end": 12, "label": "architecture.md, lines 10-12", "snippet": "..."}]}}
+{"type": "token", "payload": {"text": "The"}}
+{"type": "token", "payload": {"text": " backend"}}
+...
+{"type": "done"}
+```
+
+If the client sends `stop` while a response is streaming, the server
+sends `{"type": "stopped"}` instead of `done` and stops generating
+immediately — it does **not** wait for the current query to finish before
+checking for `stop`, since the reader and the generator run concurrently.
+
+On any failure (empty retrieval is *not* a failure — it just means zero
+citations — but a down Ollama instance, a model that isn't pulled, or an
+empty query string are), the server sends:
+```json
+{"type": "error", "payload": {"message": "..."}}
+```
+and the connection stays open for the next query.
+
+**Quick manual test** (using `websocat`, or any WS client):
+```bash
+websocat ws://localhost:8000/ws/chat
+# paste: {"type": "query", "payload": {"text": "What does the backend use?"}}
+```
+
+## Ollama prerequisite
+
+This project calls a **local** Ollama instance — no API keys, no cloud calls.
+
+```bash
+# Install Ollama: https://ollama.com/download
+ollama pull llama3
+ollama serve        # usually auto-starts; runs on http://localhost:11434
+```
+
+Verify it's reachable:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+## Project layout (Phase 1-3)
+
+```
+backend/
+├── app/
+│   ├── main.py             # FastAPI app, CORS, router wiring
+│   ├── core/
+│   │   └── config.py       # All settings (paths, model names, chunk sizes, Ollama config)
+│   ├── routes/
+│   │   ├── health.py       # Liveness check
+│   │   ├── ingest.py       # POST /ingest — file upload endpoint
+│   │   └── chat.py         # WebSocket /ws/chat — streaming RAG chat
+│   ├── rag/
+│   │   ├── loaders.py       # PDF/Markdown -> LangChain Documents (+ metadata)
+│   │   ├── splitter.py      # Chunking with overlap, line-number tracking for MD
+│   │   ├── embeddings.py    # Local HF embedding model (cached singleton)
+│   │   ├── ingestion.py     # Orchestrates load -> split -> embed -> store
+│   │   ├── retriever.py     # Top-k similarity search, shaped for citations
+│   │   ├── prompt.py        # Builds the context+query prompt sent to Ollama
+│   │   ├── ollama_client.py # Streaming Ollama client, connection/timeout errors
+│   │   └── ws_protocol.py   # Typed client<->server WebSocket message schemas
+│   ├── db/
+│   │   └── chroma_store.py  # ChromaDB client/collection wrapper
+│   └── scripts/
+│       └── ingest_cli.py    # Standalone bulk-ingestion CLI
+├── data/
+│   ├── chroma_db/           # Chroma persistent store (gitignored)
+│   └── uploads/             # Raw ingested files (gitignored)
+├── requirements.txt
+├── .env.example
+└── .python-version
+```
+
+## Status
+
+- [x] Phase 1: Project skeleton & backend environment
+- [x] Phase 2: Ingestion pipeline
+- [x] Phase 3: Retrieval + WebSocket streaming chat
+- [ ] Phase 4: Frontend foundation
+- [ ] Phase 5: Streaming UI + citations
+- [ ] Phase 6: Polish
+</file>
+
+<file path="requirements.txt">
+# --- Web framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6      # [standard] pulls in websockets + httptools, needed for WS support
+python-multipart==0.0.9        # required for FastAPI file upload (ingestion endpoint)
+websockets==13.0.1
+
+# --- RAG orchestration ---
+langchain==0.3.1
+langchain-community==0.3.1
+langchain-text-splitters==0.3.0
+
+# --- Embeddings (local, no API calls) ---
+sentence-transformers==3.1.1
+langchain-huggingface==0.1.0
+
+# --- Vector store (local persistence) ---
+chromadb==0.5.5
+langchain-chroma==0.1.4
+
+# --- Document loaders ---
+pypdf==4.3.1
+unstructured==0.15.13          # markdown parsing support
+
+# --- Ollama client ---
+ollama==0.3.3
+httpx==0.27.2
+
+# --- Utilities ---
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.5.2
+</file>
+
+</files>
