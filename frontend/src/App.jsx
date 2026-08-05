@@ -34,8 +34,10 @@ export default function App() {
         <header className="flex items-center gap-3 px-6 py-4 border-b border-slate-800 bg-slate-950/50">
           <SquareTerminal className="w-6 h-6 text-emerald-400" />
           <div>
-            <h1 className="text-lg font-bold tracking-tight text-slate-200">Architecture Explorer</h1>
-            <p className="text-xs text-slate-400">Local RAG Node running fully offline</p>
+            <h1 className="text-lg font-bold tracking-tight text-slate-200">AI Interview Preparation Assistant</h1>
+            <p className="text-xs text-slate-400">
+              {/* Local RAG Node running fully offline */}
+              </p>
           </div>
         </header>
 
@@ -106,7 +108,7 @@ export default function App() {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={isGenerating ? "AI is typing..." : "Ask about software architecture patterns, APIs, configurations..."}
+              placeholder={isGenerating ? "AI is typing..." : "Ask about interview related questions..."}
               disabled={isGenerating}
               className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/80 focus:ring-1 focus:ring-emerald-500/30 disabled:opacity-50 text-slate-200 placeholder-slate-500 transition-all pr-12"
             />

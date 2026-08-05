@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # --- App ---
-    app_name: str = "Full-Stack Architecture Explorer"
+    app_name: str = "AI Interview Preparation Assistant"
+    # "Full-Stack Architecture Explorer"
     api_v1_prefix: str = "/api/v1"
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
