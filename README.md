@@ -351,8 +351,8 @@ This project is licensed under the MIT License.
 
 **Rohan Das P**
 
-- GitHub: https://github.com/yourusername
-- LinkedIn: https://linkedin.com/in/yourprofile
+- GitHub: https://github.com/ROHAN-DAS-P
+- LinkedIn: https://linkedin.com/in/rohan-das-p
 
 ---
 
