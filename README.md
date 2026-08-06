@@ -289,39 +289,7 @@ Completion
 
 ---
 
-# 📸 Screenshots
 
-## Home
-
-```
-Add screenshot here
-```
-
----
-
-## Document Upload
-
-```
-Add screenshot here
-```
-
----
-
-## AI Chat
-
-```
-Add screenshot here
-```
-
----
-
-## Citation Panel
-
-```
-Add screenshot here
-```
-
----
 
 # 🚀 Future Improvements
 
